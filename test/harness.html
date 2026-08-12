@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>harness</title></head>
+<body>
+<script src="../vendor/pdf-lib.min.js"></script>
+<script type="module">
+import { compress } from '../compress.js';
+import * as pdfjs from '../vendor/pdf.min.mjs';
+
+// Compress a PDF served by the harness server and report what came out.
+// Re-parses the result so a "smaller" file that is actually broken fails loudly.
+window.runCompress = async (url, targetMB) => {
+  const src = await (await fetch(url)).blob();
+  const file = new File([src], url.split('/').pop(), { type: 'application/pdf' });
+
+  const t0 = performance.now();
+  const res = await compress(file, targetMB);
+  const ms = Math.round(performance.now() - t0);
+
+  const buf = new Uint8Array(await res.blob.arrayBuffer());
+  const out = await pdfjs.getDocument({ data: buf.slice() }).promise;
+  const inDoc = await pdfjs.getDocument({ data: new Uint8Array(await src.arrayBuffer()) }).promise;
+
+  const result = {
+    bytes: res.bytes, scale: res.scale ?? null, quality: res.quality ?? null,
+    unchanged: !!res.unchanged, ms,
+    outPages: out.numPages, inPages: inDoc.numPages,
+    header: new TextDecoder().decode(buf.slice(0, 5)),
+  };
+  await out.destroy(); await inDoc.destroy();
+  return result;
+};
+window.ready = true;
+</script>
+</body>
+</html>
