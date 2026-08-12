@@ -14,6 +14,13 @@ const COMBOS = [
   [1.2, 62], [1.15, 66], [1.1, 64], [1.0, 66], [1.0, 58],
 ];
 
+// A phone will kill the tab long before a desktop would. Scanners often
+// emit pages whose point size equals their pixel size, so an unclamped
+// 2.5x render can ask for 50+ megapixels — roughly 200MB for one page.
+const MAX_PIXELS = 4_000_000;
+
+const yieldToUi = () => new Promise((r) => setTimeout(r, 0));
+
 function canvasToJpeg(canvas, quality) {
   return new Promise((resolve, reject) => {
     canvas.toBlob(
@@ -24,37 +31,61 @@ function canvasToJpeg(canvas, quality) {
   });
 }
 
-// Render every page at `scale`, encode as JPEG at `quality`, reassemble.
-// Pages keep their original point dimensions, so the output is the same
-// physical size as the input rather than scale-times larger.
+// Clamp the requested scale so the canvas stays within the pixel budget.
+function safeScale(page, scale) {
+  const v = page.getViewport({ scale });
+  const px = v.width * v.height;
+  return px <= MAX_PIXELS ? scale : scale * Math.sqrt(MAX_PIXELS / px);
+}
+
+async function renderPage(doc, index, scale, canvas, ctx) {
+  const page = await doc.getPage(index);
+  const base = page.getViewport({ scale: 1 });
+  const viewport = page.getViewport({ scale: safeScale(page, scale) });
+
+  canvas.width = Math.floor(viewport.width);
+  canvas.height = Math.floor(viewport.height);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  page.cleanup();
+  return base;
+}
+
+// Render every page, encode as JPEG, reassemble. Pages keep their original
+// point dimensions, so the output is the same physical size as the input.
 async function build(doc, scale, quality, onPage) {
   const out = await PDFLib.PDFDocument.create();
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d', { alpha: false });
 
-  for (let i = 1; i <= doc.numPages; i++) {
-    const page = await doc.getPage(i);
-    const base = page.getViewport({ scale: 1 });
-    const viewport = page.getViewport({ scale });
-
-    canvas.width = Math.floor(viewport.width);
-    canvas.height = Math.floor(viewport.height);
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    await page.render({ canvasContext: ctx, viewport }).promise;
-
-    const jpeg = await canvasToJpeg(canvas, quality);
-    const img = await out.embedJpg(await jpeg.arrayBuffer());
-    const p = out.addPage([base.width, base.height]);
-    p.drawImage(img, { x: 0, y: 0, width: base.width, height: base.height });
-
-    page.cleanup();
-    if (onPage) onPage(i, doc.numPages);
+  try {
+    for (let i = 1; i <= doc.numPages; i++) {
+      const base = await renderPage(doc, i, scale, canvas, ctx);
+      const jpeg = await canvasToJpeg(canvas, quality);
+      const img = await out.embedJpg(await jpeg.arrayBuffer());
+      const p = out.addPage([base.width, base.height]);
+      p.drawImage(img, { x: 0, y: 0, width: base.width, height: base.height });
+      if (onPage) onPage(i, doc.numPages);
+      await yieldToUi();
+    }
+    return out.save();
+  } finally {
+    canvas.width = canvas.height = 0;   // release the bitmap
   }
+}
 
-  // Release the backing bitmap; phones are tight on memory.
-  canvas.width = canvas.height = 0;
-  return out.save();
+// Encode page 1 only, to predict the whole document's size cheaply. Building
+// all 15 combos in full re-renders every page 15 times, which is what kills
+// the tab on a large scan.
+async function probe(doc, scale, quality, cache) {
+  const canvas = cache.canvas;
+  if (cache.scale !== scale) {
+    await renderPage(doc, 1, scale, canvas, cache.ctx);
+    cache.scale = scale;
+  }
+  const jpeg = await canvasToJpeg(canvas, quality);
+  return jpeg.size;
 }
 
 /**
@@ -74,17 +105,31 @@ export async function compress(file, targetMB = 4.6, onProgress = () => {}) {
 
   const data = new Uint8Array(await file.arrayBuffer());
   const doc = await pdfjs.getDocument({ data }).promise;
+  const pages = doc.numPages;
+
+  const cache = { scale: null, canvas: document.createElement('canvas') };
+  cache.ctx = cache.canvas.getContext('2d', { alpha: false });
 
   try {
     for (let c = 0; c < COMBOS.length; c++) {
       const [scale, quality] = COMBOS[c];
-      onProgress({ phase: 'trying', scale, quality, combo: c + 1, combos: COMBOS.length });
+      const last = c === COMBOS.length - 1;
+      const info = { scale, quality, combo: c + 1, combos: COMBOS.length };
 
-      const bytes = await build(doc, scale, quality, (page, pages) =>
-        onProgress({ phase: 'rendering', scale, quality, page, pages, combo: c + 1, combos: COMBOS.length }),
+      // Skip combos that page 1 says will clearly overshoot. The margin keeps
+      // a combo that might still fit once the other pages are measured.
+      if (pages > 1 && !last) {
+        onProgress({ phase: 'probing', ...info });
+        const est = (await probe(doc, scale, quality, cache)) * pages * 1.02 + pages * 1024;
+        onProgress({ phase: 'probed', ...info, bytes: est, skipped: est > ceil * 1.15 });
+        if (est > ceil * 1.15) continue;
+      }
+
+      onProgress({ phase: 'trying', ...info });
+      const bytes = await build(doc, scale, quality, (page, total) =>
+        onProgress({ phase: 'rendering', ...info, page, pages: total }),
       );
-
-      onProgress({ phase: 'tried', scale, quality, bytes: bytes.length, fits: bytes.length < ceil, combo: c + 1, combos: COMBOS.length });
+      onProgress({ phase: 'tried', ...info, bytes: bytes.length, fits: bytes.length < ceil });
 
       if (bytes.length < ceil) {
         return {
@@ -98,6 +143,7 @@ export async function compress(file, targetMB = 4.6, onProgress = () => {}) {
       }
     }
   } finally {
+    cache.canvas.width = cache.canvas.height = 0;
     await doc.destroy();
   }
 

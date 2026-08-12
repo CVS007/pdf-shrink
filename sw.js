@@ -1,4 +1,4 @@
-const CACHE = 'pdf-shrink-v1';
+const CACHE = 'pdf-shrink-v2';
 const SHELL = [
   './',
   'index.html',

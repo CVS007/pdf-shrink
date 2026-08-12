@@ -5,11 +5,20 @@ const mb = (b) => (b / 1_000_000).toFixed(2);
 
 let picked = null;   // File chosen or shared in
 let output = null;   // { blob, name, bytes }
+let objectUrl = null;
 
 function say(line) {
   $('progress').classList.remove('hide');
   $('log').textContent += line + '\n';
   $('log').scrollTop = $('log').scrollHeight;
+}
+
+// Rewrite the last line instead of appending, so per-page progress
+// doesn't flood the log on a long document.
+function replaceLast(line) {
+  const t = $('log').textContent.replace(/[^\n]*\n$/, '');
+  $('log').textContent = t;
+  say(line);
 }
 
 function setFile(file) {
@@ -27,34 +36,52 @@ $('go').addEventListener('click', async () => {
   const target = parseFloat($('target').value) || 4.6;
 
   $('go').disabled = true;
+  $('go').textContent = 'Working…';
   $('result').classList.add('hide');
   $('log').textContent = '';
+  $('log').classList.remove('err');
   say(`Input : ${picked.name} (${mb(picked.size)} MB)`);
-  say(`Target: under ${target} MB\n`);
+  say(`Target: under ${target} MB`);
+  say('');
 
+  let lastPhase = null;
   try {
     const res = await compress(picked, target, (p) => {
-      if (p.phase === 'rendering') {
-        $('log').textContent = $('log').textContent.replace(/ +page \d+\/\d+\n$/, '');
-        say(`  page ${p.page}/${p.pages}`);
-      } else if (p.phase === 'tried') {
-        $('log').textContent = $('log').textContent.replace(/ +page \d+\/\d+\n$/, '');
-        say(`  scale=${p.scale} q=${p.quality} -> ${mb(p.bytes)} MB  ${p.fits ? 'fits' : 'too big'}`);
-      }
+      const line = {
+        probing: () => `  checking scale=${p.scale} q=${p.quality}…`,
+        probed: () => `  scale=${p.scale} q=${p.quality} -> ~${mb(p.bytes)} MB estimated${p.skipped ? ' (skip)' : ''}`,
+        rendering: () => `  scale=${p.scale} q=${p.quality} — page ${p.page}/${p.pages}`,
+        tried: () => `  scale=${p.scale} q=${p.quality} -> ${mb(p.bytes)} MB  ${p.fits ? 'fits' : 'too big'}`,
+      }[p.phase];
+      if (!line) return;
+      const overwrite = lastPhase === p.phase || (lastPhase === 'probing' && p.phase === 'probed')
+        || (lastPhase === 'rendering' && p.phase === 'tried');
+      overwrite ? replaceLast(line()) : say(line());
+      lastPhase = p.phase;
     });
 
     output = res;
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    objectUrl = URL.createObjectURL(res.blob);
+
     $('size').textContent = `${mb(res.bytes)} MB`;
     $('detail').textContent = res.unchanged
       ? 'Already under target — passed through unchanged, no re-encode.'
       : `scale ${res.scale}, quality ${res.quality} — ${(100 - (res.bytes / picked.size) * 100).toFixed(0)}% smaller`;
+    $('dl').href = objectUrl;
+    $('dl').download = res.name;
+    $('dl').textContent = `Download ${res.name}`;
     $('result').classList.remove('hide');
+    $('result').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    say('');
+    say('Done.');
   } catch (err) {
     say('');
     say(`ERROR: ${err.message}`);
     $('log').classList.add('err');
   } finally {
     $('go').disabled = false;
+    $('go').textContent = 'Compress';
   }
 });
 
@@ -64,18 +91,8 @@ $('share').addEventListener('click', async () => {
   if (navigator.canShare && navigator.canShare({ files: [f] })) {
     try { await navigator.share({ files: [f] }); } catch (_) { /* user cancelled */ }
   } else {
-    say('Sharing not supported here — use Save instead.');
+    say('Sharing not available here — use the download link instead.');
   }
-});
-
-$('save').addEventListener('click', () => {
-  if (!output) return;
-  const url = URL.createObjectURL(output.blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = output.name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
 });
 
 // A PDF shared in from WhatsApp/email is stashed by the service worker,

@@ -42,6 +42,11 @@
     color: var(--muted); white-space: pre-wrap; word-break: break-word;
     max-height: 12rem; overflow-y: auto; margin: 0;
   }
+  .dl {
+    display: block; margin-top: .6rem; padding: .95rem; text-align: center;
+    background: var(--line); color: var(--text); border-radius: .6rem;
+    font-weight: 600; text-decoration: none;
+  }
   .hide { display: none; }
   .big { font-size: 1.5rem; font-weight: 700; color: var(--ok); }
   .err { color: var(--err); }
@@ -72,10 +77,8 @@
 <div class="card hide" id="result">
   <div class="big" id="size"></div>
   <p class="note" id="detail"></p>
-  <div class="row" style="margin-top:.8rem">
-    <button id="share">Share</button>
-    <button id="save" class="secondary">Save</button>
-  </div>
+  <button id="share" style="margin-top:.8rem">Share to WhatsApp / email</button>
+  <a id="dl" class="dl" download>Download</a>
 </div>
 
 <script src="vendor/pdf-lib.min.js"></script>
